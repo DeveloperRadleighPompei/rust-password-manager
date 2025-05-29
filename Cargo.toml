@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+argon2-kdf = "1.6.2"
+hex = "0.4.3"
+rand = "0.9.1"
