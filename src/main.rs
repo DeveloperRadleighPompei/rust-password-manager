@@ -1,84 +1,118 @@
-use argon2_kdf::{Hasher, Algorithm};
-use std::fs::{self, File};
-use std::io::Write;
-use serde::{Deserialize, Serialize};
-use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-    Aes256Gcm, Key,
-};
+mod structs;
+mod vault;
+mod master;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct PasswordEntry {
-    name: String,
-    username: String,
-    password: String,
-    notes: Option<String>,
-}
+use std::path::Path;
 
-fn create_master(password: &[u8], salt_path: &str) {
-    let hash = Hasher::new()
-        .algorithm(Algorithm::Argon2id)
-        .salt_length(16)
-        .hash_length(32)
-        .iterations(8)
-        .memory_cost_kib(2 * 1024 * 1024)
-        .threads(4)
-        .hash(password)
-        .unwrap();
-    fs::write(salt_path, hash.salt_bytes()).expect("Failed to write salt");
-}
+use console::{Style, Emoji};
+use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
+use indicatif::{ProgressBar, ProgressStyle};
 
-fn key_from_master_and_salt(password: &[u8], salt_path: &str) -> Key<Aes256Gcm> {
-    let salt = fs::read(salt_path).expect("Failed to read salt");
-    let hash = Hasher::new()
-        .algorithm(Algorithm::Argon2id)
-        .custom_salt(&salt)
-        .hash_length(32)
-        .iterations(8)
-        .memory_cost_kib(2 * 1024 * 1024)
-        .threads(4)
-        .hash(password)
-        .unwrap();
-    let bytes = hash.as_bytes();
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(bytes);
-    Key::<Aes256Gcm>::from_slice(&key_bytes).clone()
-}
+use structs::PasswordEntry;
 
-fn build_vault(name: String, username: String, password: String, notes: Option<String>) -> Vec<PasswordEntry> {
-    vec![PasswordEntry {
-        name,
-        username,
-        password,
-        notes,
-    }]
-}
-
-fn encrypt_and_save_vault(password: &[u8], salt_path: &str, vault: Vec<PasswordEntry>, out_path: &str) {
-    let key = key_from_master_and_salt(password, salt_path);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
-    let vault_json = serde_json::to_string_pretty(&vault).unwrap();
-    let ciphertext = cipher.encrypt(&nonce, vault_json.as_bytes()).unwrap();
-
-    let mut file = File::create(out_path).unwrap();
-    file.write_all(&nonce).unwrap();
-    file.write_all(&ciphertext).unwrap();
+fn get_input(prompt: &str) -> String {
+    Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .interact_text()
+        .unwrap()
 }
 
 fn main() {
-    let password = b"hello";
     let salt_path = "salt.bin";
-    let out_path = "vault.enc";
+    let vault_path = "vault.enc";
 
-    create_master(password, salt_path);
+    let bold = Style::new().bold();
+    let green = Style::new().green();
+    let red = Style::new().red();
+    let yellow = Style::new().yellow();
+    let lock = Emoji("🔐", "");
+    let key = Emoji("🔑", "");
 
-    let vault = build_vault(
-        "example.com".to_string(),
-        "user123".to_string(),
-        "passw0rd!".to_string(),
-        Some("Some notes".to_string()),
-    );
+    println!("{} {}", lock, bold.apply_to("Welcome to VaultSafe CLI"));
 
-    encrypt_and_save_vault(password, salt_path, vault, out_path);
+    let password = Password::with_theme(&ColorfulTheme::default())
+        .with_prompt("Enter master password")
+        .interact()
+        .unwrap();
+
+    let password_bytes = password.trim().as_bytes();
+
+    let password_bytes = match master::login(password_bytes, salt_path, vault_path) {
+        Some(p) => p,
+        None => {
+            println!("{}", red.apply_to("❌ Login failed."));
+            return;
+        }
+    };
+
+    loop {
+        println!("\n{}", bold.apply_to("What would you like to do?"));
+        let options = &["➕ Add Entry", "📂 View Vault", "❌ Quit"];
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .items(options)
+            .default(0)
+            .interact()
+            .unwrap();
+
+        match selection {
+            0 => {
+                let name = get_input("Service Name");
+                let username = get_input("Username");
+                let pw = Password::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Password")
+                    .interact()
+                    .unwrap();
+                let notes = get_input("Notes (optional)");
+                let notes_opt = if notes.is_empty() { None } else { Some(notes) };
+
+                let entry = PasswordEntry {
+                    name,
+                    username,
+                    password: pw,
+                    notes: notes_opt,
+                };
+
+                let pb = ProgressBar::new_spinner();
+                pb.set_message("Encrypting and saving entry...");
+                pb.enable_steady_tick(std::time::Duration::from_millis(120));
+                pb.set_style(ProgressStyle::default_spinner().template("{spinner} {msg}").unwrap());
+
+                vault::add_to_vault(&password_bytes, salt_path, entry, vault_path);
+
+                pb.finish_with_message(green.apply_to("✔ Entry added successfully").to_string());
+            }
+
+            1 => match vault::decrypt_vault(&password_bytes, salt_path, vault_path) {
+                Ok(vault) => {
+                    if vault.is_empty() {
+                        println!("{}", yellow.apply_to("⚠ Vault is empty."));
+                    } else {
+                        println!("{}", bold.apply_to("\n🔓 Vault Contents:"));
+                        for (i, entry) in vault.iter().enumerate() {
+                            println!(
+                                "{} {}",
+                                bold.apply_to(format!("\n#{}:", i + 1)),
+                                green.apply_to(&entry.name)
+                            );
+                            println!("  {} {}", bold.apply_to("Username:"), entry.username);
+                            println!("  {} {}", bold.apply_to("Password:"), entry.password);
+                            println!(
+                                "  {} {}",
+                                bold.apply_to("Notes:"),
+                                entry.notes.clone().unwrap_or("None".into())
+                            );
+                        }
+                    }
+                }
+                Err(e) => println!("{} Failed to read vault: {}", red.apply_to("❌"), e),
+            },
+
+            2 => {
+                println!("{}", green.apply_to("👋 Goodbye."));
+                break;
+            }
+
+            _ => println!("{}", red.apply_to("❌ Invalid option.")),
+        }
+    }
 }
