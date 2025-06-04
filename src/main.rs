@@ -2,8 +2,6 @@ mod structs;
 mod vault;
 mod master;
 
-use std::path::Path;
-
 use console::{Style, Emoji};
 use dialoguer::{theme::ColorfulTheme, Input, Password, Select};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -26,7 +24,6 @@ fn main() {
     let red = Style::new().red();
     let yellow = Style::new().yellow();
     let lock = Emoji("🔐", "");
-    let key = Emoji("🔑", "");
 
     println!("{} {}", lock, bold.apply_to("Welcome to VaultSafe CLI"));
 

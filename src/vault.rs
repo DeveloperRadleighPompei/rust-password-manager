@@ -1,9 +1,9 @@
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
-    Aes256Gcm, Key, Nonce,
+    Aes256Gcm, Nonce,
 };
 use serde_json;
-use std::fs::{File, self};
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
